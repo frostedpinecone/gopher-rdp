@@ -333,7 +333,7 @@ func (d *Decompressor) Decompress(data []byte, ctype byte) ([]byte, error) {
 		for matchLen > 0 {
 			d.hist[nextOffset] = d.hist[k]
 			nextOffset++
-			k++
+				k = (k + 1) & mask
 			matchLen--
 		}
 	}

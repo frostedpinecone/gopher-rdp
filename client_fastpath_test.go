@@ -11,6 +11,13 @@ import (
 
 var discardLogger = slog.New(slog.DiscardHandler)
 
+func TestHandleFastPathPDU_MPPCWrap(t *testing.T) {
+	c := &Client{logFp: discardLogger}
+	// Three compressed bytes whose match source crosses the history boundary.
+	// The decoder must return normally, including when reached from the client.
+	c.handleFastPathPDU(0, []byte{0x83, 0x21, 3, 0, 0xff, 0xff, 0x30})
+}
+
 // buildUpdate builds a single TS_FP_UPDATE entry (same logic as fastpath_test.go).
 func buildUpdate(code, frag, compression byte, updateData []byte) []byte {
 	hdr := code&0x0F | (frag&0x03)<<4 | (compression&0x03)<<6
