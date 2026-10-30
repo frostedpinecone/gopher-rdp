@@ -158,3 +158,33 @@ func TestDrivePathLengthOverflow(t *testing.T) {
 		})
 	}
 }
+
+func TestDriveReadSizeLimit(t *testing.T) {
+	var response []byte
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "file"), []byte("hello"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHandler(func(p []byte) error { response = p; return nil }, slog.New(slog.DiscardHandler), "PC")
+	h.AddDrive(1, "share", root, true)
+	defer h.Close()
+	d := h.devices[1].(*DiskDevice)
+	f, err := d.root.Open("file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.files[1] = &openFile{f: f, path: "file"}
+	p := make([]byte, 20)
+	for _, length := range []uint32{0xffffffff, 16*1024*1024 + 1} {
+		binary.LittleEndian.PutUint32(p, length)
+		d.HandleIRP(h, &IORequest{DeviceID: 1, FileID: 1, MajorFn: IrpRead, Payload: p})
+		if binary.LittleEndian.Uint32(response[12:16]) != StatusInvalidParameter || cap(d.readBuf) != 0 {
+			t.Fatalf("oversized read allocated a buffer: length=%d capacity=%d", length, cap(d.readBuf))
+		}
+	}
+	binary.LittleEndian.PutUint32(p, 5)
+	d.HandleIRP(h, &IORequest{DeviceID: 1, FileID: 1, MajorFn: IrpRead, Payload: p})
+	if len(response) != 25 || string(response[20:]) != "hello" {
+		t.Fatalf("normal read failed: %x", response)
+	}
+}

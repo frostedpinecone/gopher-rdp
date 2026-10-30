@@ -412,6 +412,11 @@ func (d *DiskDevice) handleRead(h *Handler, req *IORequest) {
 
 	length := binary.LittleEndian.Uint32(req.Payload[0:4])
 	offset := binary.LittleEndian.Uint64(req.Payload[4:12])
+	const maxReadSize = 16 * 1024 * 1024
+	if length > maxReadSize {
+		h.sendIOCompletion(req.DeviceID, req.CompletionID, StatusInvalidParameter, nil)
+		return
+	}
 
 	d.mu.Lock()
 	of, ok := d.files[req.FileID]
