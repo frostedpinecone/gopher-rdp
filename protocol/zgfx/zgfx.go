@@ -206,6 +206,12 @@ func (d *Decompressor) decompressSegment(dst, seg []byte) ([]byte, error) {
 					return dst, err
 				}
 
+				// A match cannot reach further back than the history holds.
+				if distance > historySize {
+					dst = dst[:pos]
+					return dst, errBadDistance
+				}
+
 				// Copy from history ring buffer (byte-at-a-time for overlap)
 				srcIdx := int(d.historyIdx) - distance
 				if srcIdx < 0 {
@@ -459,6 +465,7 @@ var (
 	errBitsExhausted = zgfxError("zgfx: bits exhausted")
 	errBadToken      = zgfxError("zgfx: invalid Huffman token")
 	errBadPadding    = zgfxError("zgfx: padding exceeds segment data")
+	errBadDistance   = zgfxError("zgfx: match distance exceeds history")
 )
 
 type zgfxError string
