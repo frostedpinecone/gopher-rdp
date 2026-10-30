@@ -174,7 +174,7 @@ func (d *DiskDevice) handleCreate(h *Handler, req *IORequest) {
 	createOptions := binary.LittleEndian.Uint32(req.Payload[24:28])
 	pathLen := binary.LittleEndian.Uint32(req.Payload[28:32])
 
-	if uint32(len(req.Payload)) < 32+pathLen {
+	if uint64(pathLen) > uint64(len(req.Payload)-32) {
 		h.sendIOCompletion(req.DeviceID, req.CompletionID, StatusInvalidParameter, createOut[:])
 		return
 	}
@@ -713,7 +713,7 @@ func (d *DiskDevice) handleSetInfo(h *Handler, req *IORequest) {
 		}
 		// replaceIfExists := setData[0]
 		nameLen := binary.LittleEndian.Uint32(setData[2:6])
-		if uint32(len(setData)) < 6+nameLen {
+		if uint64(nameLen) > uint64(len(setData)-6) {
 			h.sendIOCompletion(req.DeviceID, req.CompletionID, StatusInvalidParameter, nil)
 			return
 		}
@@ -757,6 +757,10 @@ func (d *DiskDevice) handleQueryDirectory(h *Handler, req *IORequest) {
 	initialQuery := req.Payload[4] != 0
 	pathLen := binary.LittleEndian.Uint32(req.Payload[5:9])
 	// padding at [9:32]
+	if uint64(pathLen) > uint64(len(req.Payload)-32) {
+		h.sendIOCompletion(req.DeviceID, req.CompletionID, StatusInvalidParameter, nil)
+		return
+	}
 
 	d.log.LogAttrs(context.Background(), slog.LevelDebug, "QueryDirectory",
 		slog.String("infoClass", fmt.Sprintf("0x%X", infoClass)),
@@ -775,7 +779,7 @@ func (d *DiskDevice) handleQueryDirectory(h *Handler, req *IORequest) {
 
 	if initialQuery {
 		var pattern string
-		if uint32(len(req.Payload)) >= 32+pathLen && pathLen > 0 {
+		if pathLen > 0 {
 			pattern = decodeUTF16LE(req.Payload[32 : 32+pathLen])
 			// Extract just the filename part for matching
 			if idx := strings.LastIndexAny(pattern, "\\/"); idx >= 0 {

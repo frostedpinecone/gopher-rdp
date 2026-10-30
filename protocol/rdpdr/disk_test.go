@@ -121,3 +121,40 @@ func TestDriveRootContainment(t *testing.T) {
 		t.Fatal("opened a path outside the share after parent replacement")
 	}
 }
+
+func TestDrivePathLengthOverflow(t *testing.T) {
+	var response []byte
+	h := NewHandler(func(p []byte) error { response = p; return nil }, slog.New(slog.DiscardHandler), "PC")
+	h.AddDrive(1, "share", t.TempDir(), false)
+	defer h.Close()
+	d := h.devices[1].(*DiskDevice)
+	f, err := d.root.Open(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.files[1] = &openFile{f: f, path: ".", isDir: true}
+	for _, tc := range []struct {
+		name         string
+		major, minor uint32
+		payload      []byte
+		offset       int
+	}{
+		{"create", IrpCreate, 0, make([]byte, 32), 28},
+		{"directory", IrpDirControl, IrpMnQueryDir, make([]byte, 32), 5},
+		{"rename", IrpSetInfo, 0, make([]byte, 38), 34},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.major == IrpSetInfo {
+				binary.LittleEndian.PutUint32(tc.payload, FileRenameInformation)
+				d.files[1].path = "file"
+			}
+			for _, length := range []uint32{1, 0xffffffe0, 0xfffffffa, 0xffffffff} {
+				binary.LittleEndian.PutUint32(tc.payload[tc.offset:], length)
+				d.HandleIRP(h, &IORequest{DeviceID: 1, FileID: 1, MajorFn: tc.major, MinorFn: tc.minor, Payload: tc.payload})
+				if status := binary.LittleEndian.Uint32(response[12:16]); status != StatusInvalidParameter {
+					t.Fatalf("length=%x: status=%x", length, status)
+				}
+			}
+		})
+	}
+}
