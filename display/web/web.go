@@ -676,7 +676,8 @@ func handleWS(w http.ResponseWriter, r *http.Request, client *rdp.Client, log *s
 			scancode := binary.LittleEndian.Uint16(payload[1:3])
 			flags := binary.LittleEndian.Uint16(payload[3:5])
 			pressed := flags&0x8000 == 0 // KBDFLAG_RELEASE = 0x8000
-			if err := client.SendKeyboard(scancode, pressed); err != nil {
+			extended := flags&0x0100 != 0 // KBDFLAG_EXTENDED = 0x0100
+			if err := client.SendKeyboardExtended(scancode, pressed, extended); err != nil {
 				log.Debug("SendKeyboard error", "error", err)
 			}
 

@@ -5478,10 +5478,20 @@ func (c *Client) Done() <-chan struct{} {
 
 // SendKeyboard sends a keyboard event
 func (c *Client) SendKeyboard(scancode uint16, pressed bool) error {
+	return c.SendKeyboardExtended(scancode, pressed, false)
+}
+
+// SendKeyboardExtended sends a scancode with KBDFLAGS_EXTENDED when extended
+// is set. Arrows, Home, End, Insert, Delete, Page Up/Down, and the right-hand
+// modifiers need it, or the server reads them as numeric-keypad keys.
+func (c *Client) SendKeyboardExtended(scancode uint16, pressed, extended bool) error {
 	if c.State() != StateConnected {
 		return ErrNotConnected
 	}
 	flags := uint16(0)
+	if extended {
+		flags |= pdu.KbdFlagsExtended
+	}
 	if !pressed {
 		flags |= pdu.KbdFlagsRelease
 	}
