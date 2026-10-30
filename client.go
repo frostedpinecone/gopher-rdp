@@ -341,7 +341,7 @@ func (c *Client) Connect() error {
 
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrConnectionFailed, err)
+		return fmt.Errorf("%w: %w", ErrConnectionFailed, err)
 	}
 	c.conn = conn
 	c.tpktConn = tpkt.NewConn(conn, c.logTpkt)
@@ -646,7 +646,7 @@ func (c *Client) upgradeTLS() error {
 
 	tlsConn := tls.Client(c.conn, tlsConfig)
 	if err := tlsConn.Handshake(); err != nil {
-		return fmt.Errorf("%w: %v", ErrTLSFailed, err)
+		return fmt.Errorf("%w: %w", ErrTLSFailed, err)
 	}
 
 	c.tlsConn = tlsConn
@@ -900,7 +900,7 @@ func (c *Client) mcsConnect() error {
 	// Parse MCS Connect Response (BER)
 	cr, err := mcs.DecodeConnectResponse(c.logMcs, mcsPayload)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrMCSConnectFailed, err)
+		return fmt.Errorf("%w: %w", ErrMCSConnectFailed, err)
 	}
 
 	if cr.Result != 0 {
@@ -910,13 +910,13 @@ func (c *Client) mcsConnect() error {
 	// Extract GCC Conference Create Response user data
 	gccUserData, err := mcs.DecodeGCCConferenceCreateResponse(cr.UserData)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrMCSConnectFailed, err)
+		return fmt.Errorf("%w: %w", ErrMCSConnectFailed, err)
 	}
 
 	// Parse server data blocks
 	serverCore, serverSec, serverNet, err := mcs.DecodeServerData(c.logMcs, gccUserData)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrMCSConnectFailed, err)
+		return fmt.Errorf("%w: %w", ErrMCSConnectFailed, err)
 	}
 
 	c.serverCore = serverCore
@@ -1456,12 +1456,12 @@ func (c *Client) mcsAttachUser() error {
 
 	mcsPayload, err := x224.DecodeDataTPDU(resp)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrMCSConnectFailed, err)
+		return fmt.Errorf("%w: %w", ErrMCSConnectFailed, err)
 	}
 
 	userID, err := mcs.DecodeAttachUserConfirm(c.logMcs, mcsPayload)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrMCSConnectFailed, err)
+		return fmt.Errorf("%w: %w", ErrMCSConnectFailed, err)
 	}
 
 	c.userChannelID = userID
@@ -1502,12 +1502,12 @@ func (c *Client) mcsJoinChannel(channelID uint16) error {
 
 	mcsPayload, err := x224.DecodeDataTPDU(resp)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrMCSChannelJoinFailed, err)
+		return fmt.Errorf("%w: %w", ErrMCSChannelJoinFailed, err)
 	}
 
 	confirmedID, err := mcs.DecodeChannelJoinConfirm(c.logMcs, mcsPayload)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrMCSChannelJoinFailed, err)
+		return fmt.Errorf("%w: %w", ErrMCSChannelJoinFailed, err)
 	}
 
 	c.logMcs.LogAttrs(context.Background(), slog.LevelDebug, "MCS Channel Join Confirm", slog.Int("channel", int(confirmedID)))
@@ -1558,7 +1558,7 @@ func (c *Client) securityExchange() error {
 	// Parse server certificate and extract RSA public key
 	blob, err := sec.DecodeServerSecurityBlob(c.serverSec.RawData)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrSecurityExchangeFailed, err)
+		return fmt.Errorf("%w: %w", ErrSecurityExchangeFailed, err)
 	}
 
 	// RSA encrypt the client random with the server's public key
@@ -1700,7 +1700,7 @@ func (c *Client) readDecryptedPDU() (channelID uint16, payload []byte, err error
 func (c *Client) readLicensingPDU() (lic.Preamble, []byte, error) {
 	channelID, userData, err := c.readDataPDU()
 	if err != nil {
-		return lic.Preamble{}, nil, fmt.Errorf("%w: %v", ErrLicensingFailed, err)
+		return lic.Preamble{}, nil, fmt.Errorf("%w: %w", ErrLicensingFailed, err)
 	}
 
 	if channelID != c.ioChannelID {
@@ -1710,7 +1710,7 @@ func (c *Client) readLicensingPDU() (lic.Preamble, []byte, error) {
 
 	hdr, licData, err := sec.DecodeBasicSecurityHeader(userData)
 	if err != nil {
-		return lic.Preamble{}, nil, fmt.Errorf("%w: %v", ErrLicensingFailed, err)
+		return lic.Preamble{}, nil, fmt.Errorf("%w: %w", ErrLicensingFailed, err)
 	}
 
 	if hdr.Flags&sec.LicensePkt == 0 {
@@ -1727,7 +1727,7 @@ func (c *Client) readLicensingPDU() (lic.Preamble, []byte, error) {
 
 	preamble, body, err := lic.DecodePreamble(c.logLic, licData)
 	if err != nil {
-		return lic.Preamble{}, nil, fmt.Errorf("%w: %v", ErrLicensingFailed, err)
+		return lic.Preamble{}, nil, fmt.Errorf("%w: %w", ErrLicensingFailed, err)
 	}
 
 	return preamble, body, nil
@@ -1764,7 +1764,7 @@ func (c *Client) handleLicensing() error {
 	if preamble.MsgType == lic.ErrorAlert {
 		ea, err := lic.DecodeErrorAlert(body)
 		if err != nil {
-			return fmt.Errorf("%w: %v", ErrLicensingFailed, err)
+			return fmt.Errorf("%w: %w", ErrLicensingFailed, err)
 		}
 		if ea.ErrorCode == lic.StatusValidClient {
 			c.logLic.LogAttrs(context.Background(), slog.LevelDebug, "licensing: STATUS_VALID_CLIENT (no license required)")
@@ -1834,7 +1834,7 @@ func (c *Client) handleLicensing() error {
 	if preamble.MsgType == lic.ErrorAlert {
 		ea, err := lic.DecodeErrorAlert(body)
 		if err != nil {
-			return fmt.Errorf("%w: %v", ErrLicensingFailed, err)
+			return fmt.Errorf("%w: %w", ErrLicensingFailed, err)
 		}
 		if ea.ErrorCode == lic.StatusValidClient {
 			c.logLic.LogAttrs(context.Background(), slog.LevelDebug, "licensing: STATUS_VALID_CLIENT after new license request")
@@ -1907,7 +1907,7 @@ func (c *Client) handleLicensing() error {
 	case lic.ErrorAlert:
 		ea, err := lic.DecodeErrorAlert(body)
 		if err != nil {
-			return fmt.Errorf("%w: %v", ErrLicensingFailed, err)
+			return fmt.Errorf("%w: %w", ErrLicensingFailed, err)
 		}
 		if ea.ErrorCode == lic.StatusValidClient {
 			c.logLic.LogAttrs(context.Background(), slog.LevelDebug, "licensing: STATUS_VALID_CLIENT")
@@ -1931,7 +1931,7 @@ func (c *Client) handleCapabilitiesExchange() error {
 
 	channelID, userData, err := c.readDecryptedPDU()
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrCapabilitiesFailed, err)
+		return fmt.Errorf("%w: %w", ErrCapabilitiesFailed, err)
 	}
 
 	if channelID != c.ioChannelID {
@@ -1941,7 +1941,7 @@ func (c *Client) handleCapabilitiesExchange() error {
 
 	hdr, rest, err := pdu.DecodeShareControlHeader(c.logPdu, userData)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrCapabilitiesFailed, err)
+		return fmt.Errorf("%w: %w", ErrCapabilitiesFailed, err)
 	}
 
 	if hdr.PDUType != pdu.TypeDemandActive {
@@ -1951,7 +1951,7 @@ func (c *Client) handleCapabilitiesExchange() error {
 
 	da, err := pdu.DecodeDemandActive(c.logPdu, rest)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrCapabilitiesFailed, err)
+		return fmt.Errorf("%w: %w", ErrCapabilitiesFailed, err)
 	}
 
 	c.shareID.Store(da.ShareID)
@@ -2194,12 +2194,12 @@ func (c *Client) handleFinalization() error {
 
 		_, scRest, err := pdu.DecodeShareControlHeader(c.logPdu, userData)
 		if err != nil {
-			return fmt.Errorf("%w: %v", ErrFinalizationFailed, err)
+			return fmt.Errorf("%w: %w", ErrFinalizationFailed, err)
 		}
 
 		sdHdr, sdPayload, err := pdu.DecodeShareDataHeader(c.logPdu, scRest)
 		if err != nil {
-			return fmt.Errorf("%w: %v", ErrFinalizationFailed, err)
+			return fmt.Errorf("%w: %w", ErrFinalizationFailed, err)
 		}
 
 		if sdHdr.CompressedType&mppc.FlagCompressed != 0 {
@@ -2262,12 +2262,12 @@ func (c *Client) handleFinalization() error {
 
 		_, scRest, err := pdu.DecodeShareControlHeader(c.logPdu, userData)
 		if err != nil {
-			return fmt.Errorf("%w: %v", ErrFinalizationFailed, err)
+			return fmt.Errorf("%w: %w", ErrFinalizationFailed, err)
 		}
 
 		sdHdr, sdPayload, err := pdu.DecodeShareDataHeader(c.logPdu, scRest)
 		if err != nil {
-			return fmt.Errorf("%w: %v", ErrFinalizationFailed, err)
+			return fmt.Errorf("%w: %w", ErrFinalizationFailed, err)
 		}
 
 		if sdHdr.CompressedType&mppc.FlagCompressed != 0 {
