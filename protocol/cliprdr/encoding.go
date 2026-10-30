@@ -117,10 +117,14 @@ func dibToPNG(dib []byte) ([]byte, error) {
 	}
 
 	// Each row is padded to a 4-byte boundary.
-	rowBytes := (biWidth*bpp + 3) &^ 3
-	needed := pixelOffset + rowBytes*biHeight
-	if len(dib) < needed {
-		return nil, fmt.Errorf("cliprdr: DIB data truncated (have %d, need %d)", len(dib), needed)
+	rowSize := (uint64(biWidth)*uint64(bpp) + 3) &^ 3
+	if len(dib) < pixelOffset || rowSize > uint64(len(dib)-pixelOffset)/uint64(biHeight) {
+		return nil, fmt.Errorf("cliprdr: DIB data truncated for %dx%d image", biWidth, biHeight)
+	}
+	rowBytes := int(rowSize)
+	// RGBA output must also fit an int on 32-bit builds.
+	if uint64(biWidth)*uint64(biHeight) > uint64(int(^uint(0)>>1))/4 {
+		return nil, fmt.Errorf("cliprdr: DIB dimensions too large")
 	}
 
 	img := image.NewNRGBA(image.Rect(0, 0, biWidth, biHeight))

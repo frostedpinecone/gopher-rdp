@@ -265,6 +265,21 @@ func TestDibToPNG_Errors(t *testing.T) {
 	}
 }
 
+func TestDibToPNG_SizeOverflow(t *testing.T) {
+	for _, height := range []uint32{0x7fffffff, 0x80000000, 1} {
+		for _, bpp := range []uint16{24, 32} {
+			dib := make([]byte, bihSize)
+			binary.LittleEndian.PutUint32(dib[0:4], bihSize)
+			binary.LittleEndian.PutUint32(dib[4:8], 0x7fffffff)
+			binary.LittleEndian.PutUint32(dib[8:12], height)
+			binary.LittleEndian.PutUint16(dib[14:16], bpp)
+			if _, err := dibToPNG(dib); err == nil {
+				t.Fatalf("accepted width=INT32_MAX height=%x bpp=%d", height, bpp)
+			}
+		}
+	}
+}
+
 func TestPngToDIB_RoundTrip(t *testing.T) {
 	// Create a 3x2 NRGBA image
 	img := image.NewNRGBA(image.Rect(0, 0, 3, 2))
