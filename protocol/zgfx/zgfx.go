@@ -15,6 +15,10 @@ import (
 
 const historySize = 2_500_000
 
+// MS-RDPEGFX 3.1.9.1.2 limits each segment to 65,535 decoded bytes.
+const maxSegmentSize = 65535
+const maxDecompressedSize = 64 * 1024 * 1024
+
 // Decompressor maintains ZGFX decompression state including the history buffer.
 type Decompressor struct {
 	history    [historySize]byte
@@ -64,34 +68,38 @@ func (d *Decompressor) Decompress(dst, src []byte) ([]byte, error) {
 		}
 		segCount := binary.LittleEndian.Uint16(src[1:3])
 		uncompSize := binary.LittleEndian.Uint32(src[3:7])
+		if segCount == 0 || int(segCount) > (len(src)-7)/5 || uncompSize > maxDecompressedSize {
+			return dst, errOutputSize
+		}
 		if d.log != nil {
 			d.log.LogAttrs(context.Background(), slog.LevelDebug, "zgfx decompress multi", slog.Int("segments", int(segCount)), slog.Int("uncompSize", int(uncompSize)), slog.Int("srcLen", len(src)))
 		}
 		off := 7
 
-		// Ensure dst capacity
-		need := int(uncompSize)
-		if cap(dst) >= need {
-			dst = dst[:0]
-		} else {
-			dst = make([]byte, 0, need)
-		}
+		// Grow only as bytes are decoded; the advertised size is untrusted.
+		dst = dst[:0]
 
 		for i := 0; i < int(segCount); i++ {
 			if off+4 > len(src) {
 				return dst, errTruncated
 			}
-			segSize := int(binary.LittleEndian.Uint32(src[off : off+4]))
+			segSize := binary.LittleEndian.Uint32(src[off : off+4])
 			off += 4
-			if off+segSize > len(src) {
+			if uint64(segSize) > uint64(len(src)-off) {
 				return dst, errTruncated
 			}
 			var err error
-			dst, err = d.decompressSegment(dst, src[off:off+segSize])
+			dst, err = d.decompressSegment(dst, src[off:off+int(segSize)])
 			if err != nil {
 				return dst, err
 			}
-			off += segSize
+			if len(dst) > int(uncompSize) {
+				return dst, errOutputSize
+			}
+			off += int(segSize)
+		}
+		if len(dst) != int(uncompSize) || off != len(src) {
+			return dst, errOutputSize
 		}
 		return dst, nil
 
@@ -104,11 +112,18 @@ func (d *Decompressor) decompressSegment(dst, seg []byte) ([]byte, error) {
 	if len(seg) < 1 {
 		return dst, errShortInput
 	}
+	if len(dst) > maxDecompressedSize {
+		return dst, errOutputSize
+	}
+	limit := min(len(dst)+maxSegmentSize, maxDecompressedSize)
 
 	flags := seg[0]
 	if flags&0x20 == 0 {
 		// Uncompressed segment — copy directly and add to history
 		data := seg[1:]
+		if len(data) > limit-len(dst) {
+			return dst, errOutputSize
+		}
 		dst = append(dst, data...)
 		d.historyWrite(data)
 		return dst, nil
@@ -141,6 +156,9 @@ func (d *Decompressor) decompressSegment(dst, seg []byte) ([]byte, error) {
 
 		if token.tokenType == 0 {
 			// Literal byte
+			if pos >= limit {
+				return dst, errOutputSize
+			}
 			val, err := d.readBits(int(token.valueBits))
 			if err != nil {
 				dst = dst[:pos]
@@ -178,6 +196,9 @@ func (d *Decompressor) decompressSegment(dst, seg []byte) ([]byte, error) {
 				d.byteAlign()
 				// Read raw bytes directly from bit stream
 				n := int(count)
+				if n > limit-pos {
+					return dst, errOutputSize
+				}
 				for i := 0; i < n; i++ {
 					val, err := d.readBits(8)
 					if err != nil {
@@ -207,6 +228,9 @@ func (d *Decompressor) decompressSegment(dst, seg []byte) ([]byte, error) {
 				}
 
 				// A match cannot reach further back than the history holds.
+				if length > limit-pos {
+					return dst, errOutputSize
+				}
 				if distance > historySize {
 					dst = dst[:pos]
 					return dst, errBadDistance
@@ -277,6 +301,9 @@ func (d *Decompressor) readMatchLength() (int, error) {
 		}
 		count *= 2
 		extra++
+		if count > maxSegmentSize {
+			return 0, errOutputSize
+		}
 	}
 
 	extraVal, err := d.readBits(extra)
@@ -466,6 +493,7 @@ var (
 	errBadToken      = zgfxError("zgfx: invalid Huffman token")
 	errBadPadding    = zgfxError("zgfx: padding exceeds segment data")
 	errBadDistance   = zgfxError("zgfx: match distance exceeds history")
+	errOutputSize    = zgfxError("zgfx: invalid or excessive decompressed size")
 )
 
 type zgfxError string

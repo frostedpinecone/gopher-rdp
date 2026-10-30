@@ -2,8 +2,49 @@ package zgfx
 
 import (
 	"bytes"
+	"encoding/binary"
+	"strings"
 	"testing"
 )
+
+func TestDecompressOutputLimits(t *testing.T) {
+	for _, size := range []uint32{32 << 20, maxDecompressedSize + 1, 0xffffffff} {
+		src := make([]byte, 12)
+		src[0] = 0xe1
+		src[1] = 1 // one empty segment
+		src[7] = 1
+		binary.LittleEndian.PutUint32(src[3:7], size)
+		var d Decompressor
+		out, err := d.Decompress(nil, src)
+		if err == nil || cap(out) != 0 {
+			t.Fatalf("size=%d: allocated %d bytes, err=%v", size, cap(out), err)
+		}
+	}
+	for _, size := range []int{maxSegmentSize, maxSegmentSize + 1} {
+		src := make([]byte, 2+size)
+		src[0] = 0xe0
+		var d Decompressor
+		_, err := d.Decompress(nil, src)
+		if (err != nil) != (size > maxSegmentSize) {
+			t.Fatalf("segment size=%d: %v", size, err)
+		}
+	}
+	// A distance-one match with an overflowing unary length must stop early.
+	bits := "1000100001" + strings.Repeat("1", 70) + "0" + strings.Repeat("0", 72)
+	src := []byte{0xe0, 0x20}
+	for i := 0; i < len(bits); i += 8 {
+		var b byte
+		for j := 0; j < 8 && i+j < len(bits); j++ {
+			b |= (bits[i+j] - '0') << (7 - j)
+		}
+		src = append(src, b)
+	}
+	src = append(src, byte((8-len(bits)%8)%8))
+	var d Decompressor
+	if out, err := d.Decompress(nil, src); err == nil || len(out) != 0 {
+		t.Fatalf("accepted oversized match: len=%d err=%v", len(out), err)
+	}
+}
 
 func TestDecompressUncompressedSingle(t *testing.T) {
 	// Single segment, uncompressed: descriptor=0xE0, flags=0x00 (no COMPRESSED bit)
