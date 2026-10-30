@@ -120,6 +120,10 @@ func (d *Decompressor) decompressSegment(dst, seg []byte) ([]byte, error) {
 	}
 	lastByte := seg[len(seg)-1]
 	d.bits = seg[1 : len(seg)-1] // strip flags byte and tail padding byte
+	if uint32(lastByte) > uint32(len(d.bits))*8 {
+		// More padding than data would underflow bitsRemain and read past d.bits.
+		return dst, errBadPadding
+	}
 	d.bitPos = 0
 	d.bitsRemain = uint32(len(d.bits))*8 - uint32(lastByte)
 
@@ -454,6 +458,7 @@ var (
 	errBadDescriptor = zgfxError("zgfx: invalid descriptor byte")
 	errBitsExhausted = zgfxError("zgfx: bits exhausted")
 	errBadToken      = zgfxError("zgfx: invalid Huffman token")
+	errBadPadding    = zgfxError("zgfx: padding exceeds segment data")
 )
 
 type zgfxError string
