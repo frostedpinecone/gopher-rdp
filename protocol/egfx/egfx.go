@@ -21,6 +21,10 @@ import (
 // levelTrace is a custom log level below Debug for very verbose diagnostics.
 const levelTrace = slog.LevelDebug - 4
 
+// Bound individual pixel buffers and the combined surface/bitmap cache storage.
+const maxSurfaceBytes = 256 * 1024 * 1024
+const maxGraphicsBytes = 512 * 1024 * 1024
+
 // ChannelName is the dynamic virtual channel name for RDPGFX.
 const ChannelName = "Microsoft::Windows::RDS::Graphics"
 
@@ -143,6 +147,7 @@ type Handler struct {
 	surfaces        map[uint16]*Surface
 	outputMap       map[uint16][2]int // surfaceID → (screenX, screenY)
 	cache           map[uint16]*cacheEntry // slot → cached bitmap
+	pixelBytes      int // bytes held by surfaces and cached bitmaps
 	framesDecoded   uint32
 	curFrameID      uint32
 	onBitmap        func(surfID uint16, x, y, w, h int, data []byte)
@@ -503,6 +508,15 @@ func (h *Handler) handleCreateSurface(data []byte) {
 	w := binary.LittleEndian.Uint16(data[2:4])
 	hh := binary.LittleEndian.Uint16(data[4:6])
 	// pixFmt := data[6]
+	size := uint64(w) * uint64(hh) * 4
+	oldSize := 0
+	if old := h.surfaces[surfId]; old != nil {
+		oldSize = len(old.Data)
+	}
+	if size == 0 || size > maxSurfaceBytes || size > uint64(maxGraphicsBytes-h.pixelBytes+oldSize) {
+		h.log.Warn("surface exceeds pixel memory limit", "width", w, "height", hh)
+		return
+	}
 
 	// Cap surface count to prevent unbounded memory growth.
 	const maxSurfaces = 256
@@ -512,7 +526,8 @@ func (h *Handler) handleCreateSurface(data []byte) {
 		return
 	}
 
-	pixBuf := make([]byte, int(w)*int(hh)*4)
+	pixBuf := make([]byte, int(size))
+	h.pixelBytes += len(pixBuf) - oldSize
 	// Fill with 0xFF (opaque white) per MS-RDPEGFX 3.3.5.2.
 	// Ensures no pixel has alpha=0, which would cause transparency artifacts
 	// if the framebuffer is blitted to the screen before every pixel is painted.
@@ -533,6 +548,9 @@ func (h *Handler) handleDeleteSurface(data []byte) {
 		return
 	}
 	surfId := binary.LittleEndian.Uint16(data[0:2])
+	if surf := h.surfaces[surfId]; surf != nil {
+		h.pixelBytes -= len(surf.Data)
+	}
 	delete(h.surfaces, surfId)
 	delete(h.outputMap, surfId)
 	h.progressive.ClearContext(uint32(surfId))
@@ -807,7 +825,7 @@ func (h *Handler) handleWireToSurface1(data []byte) {
 	right := int(binary.LittleEndian.Uint16(data[9:11]))
 	bottom := int(binary.LittleEndian.Uint16(data[11:13]))
 	bitmapLen := binary.LittleEndian.Uint32(data[13:17])
-	if int(bitmapLen) > len(data)-17 {
+	if uint64(bitmapLen) > uint64(len(data)-17) {
 		h.log.LogAttrs(context.Background(), slog.LevelWarn, "WireToSurface1 bitmap data truncated")
 		return
 	}
@@ -824,6 +842,9 @@ func (h *Handler) handleWireToSurface1(data []byte) {
 		h.log.LogAttrs(context.Background(), slog.LevelWarn, "WireToSurface1 unknown surface", slog.Int("surfaceId", int(surfId)))
 		return
 	}
+	if right > int(surf.Width) || bottom > int(surf.Height) {
+		return
+	}
 
 	h.log.LogAttrs(context.Background(), slog.LevelDebug, "WireToSurface1", slog.Int("surfaceId", int(surfId)), sloghex.Hex4("codecId", codecId),
 		slog.Int("left", left), slog.Int("top", top), slog.Int("right", right), slog.Int("bottom", bottom), slog.Int("width", w), slog.Int("height", hh), slog.Int("bitmapLen", int(bitmapLen)))
@@ -834,6 +855,9 @@ func (h *Handler) handleWireToSurface1(data []byte) {
 	case CodecUncompressed:
 		// Wire format is BGRX; convert to RGBA in-place using codecBuf.
 		need := w * hh * 4
+		if len(bitmapData) < need {
+			return
+		}
 		if cap(h.codecBuf) >= need {
 			h.codecBuf = h.codecBuf[:need]
 		} else {
@@ -990,7 +1014,7 @@ func (h *Handler) handleWireToSurface2(data []byte) {
 		return
 	}
 
-	if int(bitmapLen) > len(data)-13 {
+	if uint64(bitmapLen) > uint64(len(data)-13) {
 		h.log.LogAttrs(context.Background(), slog.LevelWarn, "WireToSurface2 bitmap data truncated")
 		return
 	}
@@ -1163,6 +1187,10 @@ func (h *Handler) handleResetGraphics(data []byte) {
 	}
 	w := int(binary.LittleEndian.Uint32(data[0:4]))
 	hh := int(binary.LittleEndian.Uint32(data[4:8]))
+	if w <= 0 || hh <= 0 || w > 65535 || hh > 65535 || uint64(w)*uint64(hh)*4 > maxSurfaceBytes {
+		h.log.Warn("graphics reset dimensions exceed limit", "width", w, "height", hh)
+		return
+	}
 	// monitorCount := binary.LittleEndian.Uint32(data[8:12])
 	// followed by monitor definitions, pad to 340 bytes
 
@@ -1170,6 +1198,9 @@ func (h *Handler) handleResetGraphics(data []byte) {
 	// NOTE: bitmap cache (h.cache) is NOT cleared — the server expects
 	// cached bitmaps to survive ResetGraphics and uses CacheToSurface
 	// immediately after creating the new surface.
+	for _, surf := range h.surfaces {
+		h.pixelBytes -= len(surf.Data)
+	}
 	clear(h.surfaces)
 	clear(h.outputMap)
 	h.progressive = rfx.NewDecoder(h.log)
@@ -1232,6 +1263,9 @@ func (h *Handler) handleSolidFill(data []byte) {
 		right := int(binary.LittleEndian.Uint16(data[off+4 : off+6]))
 		bottom := int(binary.LittleEndian.Uint16(data[off+6 : off+8]))
 		off += 8
+		if right > int(surf.Width) || bottom > int(surf.Height) {
+			continue
+		}
 
 		w := right - left
 		hh := bottom - top
@@ -1270,6 +1304,9 @@ func (h *Handler) handleSurfaceToSurface(data []byte) {
 	srcSurf := h.surfaces[srcSurfId]
 	dstSurf := h.surfaces[dstSurfId]
 	if srcSurf == nil || dstSurf == nil {
+		return
+	}
+	if srcRight > int(srcSurf.Width) || srcBottom > int(srcSurf.Height) {
 		return
 	}
 
@@ -1376,7 +1413,19 @@ func (h *Handler) handleSurfaceToCache(data []byte) {
 
 	srcStride := int(surf.Width) * 4
 	rowBytes := w * 4
-	pixBuf := make([]byte, rowBytes*hh)
+	if right > int(surf.Width) || bottom > int(surf.Height) {
+		return
+	}
+	need := rowBytes * hh
+	oldSize := 0
+	if old := h.cache[cacheSlot]; old != nil {
+		oldSize = len(old.data)
+	}
+	if need > maxGraphicsBytes-h.pixelBytes+oldSize {
+		h.log.Warn("bitmap cache exceeds pixel memory limit")
+		return
+	}
+	pixBuf := make([]byte, need)
 	for row := 0; row < hh; row++ {
 		srcOff := (top+row)*srcStride + left*4
 		if srcOff+rowBytes <= len(surf.Data) {
@@ -1391,11 +1440,13 @@ func (h *Handler) handleSurfaceToCache(data []byte) {
 			slog.Int("limit", maxCacheEntries))
 		// Evict an arbitrary entry to make room.
 		for k := range h.cache {
+			h.pixelBytes -= len(h.cache[k].data)
 			delete(h.cache, k)
 			break
 		}
 	}
 	h.cache[cacheSlot] = &cacheEntry{data: pixBuf, width: w, height: hh}
+	h.pixelBytes += need - oldSize
 
 	h.log.LogAttrs(context.Background(), slog.LevelDebug, "SurfaceToCache",
 		slog.Int("surfaceId", int(surfId)), slog.Int("cacheSlot", int(cacheSlot)),
@@ -1552,5 +1603,8 @@ func (h *Handler) handleEvictCacheEntry(data []byte) {
 		return
 	}
 	cacheSlot := binary.LittleEndian.Uint16(data[0:2])
+	if entry := h.cache[cacheSlot]; entry != nil {
+		h.pixelBytes -= len(entry.data)
+	}
 	delete(h.cache, cacheSlot)
 }
