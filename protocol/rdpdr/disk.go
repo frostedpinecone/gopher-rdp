@@ -222,6 +222,10 @@ func (d *DiskDevice) handleCreate(h *Handler, req *IORequest) {
 
 	isDir := createOptions&FileDirectoryFile != 0
 	deleteOnClose := createOptions&FileDeleteOnClose != 0
+	if deleteOnClose && (d.readOnly || localPath == d.root) {
+		h.sendIOCompletion(req.DeviceID, req.CompletionID, StatusAccessDenied, createOut[:])
+		return
+	}
 
 	// When neither FILE_DIRECTORY_FILE nor FILE_NON_DIRECTORY_FILE is set,
 	// detect the actual type from the filesystem (MS-FSCC behavior).
@@ -408,8 +412,8 @@ func (d *DiskDevice) handleClose(h *Handler, req *IORequest) {
 			slog.String("path", of.path),
 			slog.Bool("deleteOnClose", of.deleteOnClose),
 			slog.Int("fileID", int(req.FileID)))
-		if of.deleteOnClose {
-			if err := os.RemoveAll(of.path); err != nil {
+		if of.deleteOnClose && !d.readOnly && of.path != d.root {
+			if err := os.Remove(of.path); err != nil {
 				d.log.LogAttrs(context.Background(), slog.LevelWarn, "delete on close failed",
 					slog.String("path", of.path), slog.Any("err", err))
 			} else {
@@ -707,7 +711,7 @@ func (d *DiskDevice) handleSetInfo(h *Handler, req *IORequest) {
 		h.sendIOCompletion(req.DeviceID, req.CompletionID, StatusSuccess, out[:])
 
 	case FileDispositionInformation:
-		if d.readOnly {
+		if d.readOnly || of.path == d.root {
 			h.sendIOCompletion(req.DeviceID, req.CompletionID, StatusAccessDenied, nil)
 			return
 		}
