@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"sync"
 	"time"
@@ -46,6 +47,7 @@ const (
 // NewWebHandler returns an http.Handler that serves an HTML viewer page
 // at "/" and a WebSocket endpoint at "/ws" for streaming bitmap updates
 // and receiving keyboard/mouse input. Uses a pre-connected RDP client.
+// Wrap the returned handler with WithSessionToken before serving it.
 func NewWebHandler(client *rdp.Client, logger *slog.Logger, width, height int, kbMode rdp.KeyboardMode) http.Handler {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
@@ -64,7 +66,7 @@ func NewWebHandler(client *rdp.Client, logger *slog.Logger, width, height int, k
 			if kbMode == rdp.KeyboardUnicode {
 				kb = "unicode"
 			}
-			http.Redirect(w, r, fmt.Sprintf("/?w=%d&h=%d&kb=%s", width, height, kb), http.StatusFound)
+			http.Redirect(w, r, fmt.Sprintf("/?w=%d&h=%d&kb=%s&token=%s", width, height, kb, url.QueryEscape(r.URL.Query().Get("token"))), http.StatusFound)
 			return
 		}
 		data, _ := indexHTML.ReadFile("index.html")
@@ -86,6 +88,7 @@ func NewWebHandler(client *rdp.Client, logger *slog.Logger, width, height int, k
 // as ?w=X&h=Y on the WebSocket connection. The first WebSocket connection
 // triggers the RDP connection at those dimensions.
 // The returned channel is closed when the RDP session ends.
+// Wrap the returned handler with WithSessionToken before serving it.
 func NewAutoWebHandler(opts *rdp.Options) (http.Handler, <-chan struct{}) {
 	logger := opts.Logger
 	if logger == nil {
@@ -120,14 +123,14 @@ func NewAutoWebHandler(opts *rdp.Options) (http.Handler, <-chan struct{}) {
 			if opts.AudioOut != nil {
 				abuf = opts.AudioOut.BufMs
 			}
-			url := fmt.Sprintf("/?kb=%s&abuf=%d", kb, abuf)
+			redirectURL := fmt.Sprintf("/?kb=%s&abuf=%d&token=%s", kb, abuf, url.QueryEscape(r.URL.Query().Get("token")))
 			if opts.Interpolate {
-				url += "&interpolate=1"
+				redirectURL += "&interpolate=1"
 			}
 			if opts.NoDPR {
-				url += "&nodpr=1"
+				redirectURL += "&nodpr=1"
 			}
-			http.Redirect(w, r, url, http.StatusFound)
+			http.Redirect(w, r, redirectURL, http.StatusFound)
 			return
 		}
 		data, _ := indexHTML.ReadFile("index.html")
@@ -819,6 +822,7 @@ func lockedSendCursorMsg(conn *wsConn, cm *cursorMsg) error {
 // NewMultiMonitorHandler returns an http.Handler for multi-monitor web viewing.
 // Each monitor is served at /monitor/{N} and connects via /ws?monitor=N.
 // The landing page at "/" lists all monitors with links.
+// Wrap the returned handler with WithSessionToken before serving it.
 func NewMultiMonitorHandler(d *Dispatcher) http.Handler {
 	kbMode := d.KBMode()
 
@@ -853,15 +857,15 @@ a{color:#cc7000;}h1{margin-bottom:20px;}
 			if m.Primary {
 				label += " (primary)"
 			}
-			fmt.Fprintf(w, `<li><a href="/monitor/%d" target="_blank">%s</a></li>`, m.Index, label)
+			fmt.Fprintf(w, `<li><a href="/monitor/%d?token=%s" target="_blank">%s</a></li>`, m.Index, url.QueryEscape(r.URL.Query().Get("token")), label)
 		}
 		fmt.Fprintf(w, `</ul>
-<p class="disconnect"><a href="/disconnect">Disconnect</a></p>
+<p class="disconnect"><a href="/disconnect?token=%s">Disconnect</a></p>
 <script>
 var proto=location.protocol==="https:"?"wss:":"ws:";
-var ws=new WebSocket(proto+"//"+location.host+"/ws/control");
+var ws=new WebSocket(proto+"//"+location.host+"/ws/control?token="+encodeURIComponent(new URLSearchParams(location.search).get("token")||""));
 ws.onclose=function(){window.close();};
-</script></body></html>`)
+</script></body></html>`, url.QueryEscape(r.URL.Query().Get("token")))
 	})
 
 	mux.HandleFunc("/monitor/", func(w http.ResponseWriter, r *http.Request) {
@@ -888,9 +892,9 @@ ws.onclose=function(){window.close();};
 			abuf = d.opts.AudioOut.BufMs
 		}
 		if m.Width == 0 {
-			http.Redirect(w, r, fmt.Sprintf("/?monitor=%d&kb=%s&primary=%s&abuf=%d", idx, kb, pri, abuf), http.StatusFound)
+			http.Redirect(w, r, fmt.Sprintf("/?monitor=%d&kb=%s&primary=%s&abuf=%d&token=%s", idx, kb, pri, abuf, url.QueryEscape(r.URL.Query().Get("token"))), http.StatusFound)
 		} else {
-			http.Redirect(w, r, fmt.Sprintf("/?w=%d&h=%d&monitor=%d&kb=%s&primary=%s&abuf=%d", m.Width, m.Height, idx, kb, pri, abuf), http.StatusFound)
+			http.Redirect(w, r, fmt.Sprintf("/?w=%d&h=%d&monitor=%d&kb=%s&primary=%s&abuf=%d&token=%s", m.Width, m.Height, idx, kb, pri, abuf, url.QueryEscape(r.URL.Query().Get("token"))), http.StatusFound)
 		}
 	})
 
@@ -943,7 +947,7 @@ ws.onclose=function(){window.close();};
 	return mux
 }
 
-// ListenAddr converts a port number to a listen address (e.g. "8080" → ":8080").
+// ListenAddr converts a port number to a loopback listen address.
 func ListenAddr(port string) string {
-	return ":" + port
+	return "127.0.0.1:" + port
 }

@@ -48,7 +48,7 @@ go build -o gopher-rdp ./client
 
 # Connect with web viewer (auto-detects browser resolution)
 ./gopher-rdp -host 192.168.1.100 -user admin -pass secret -web 8080
-# Then open http://localhost:8080 in a browser
+# Open the token-bearing URL printed by the client (listens on loopback only)
 
 # Multi-display web viewer (each browser tab = one display)
 ./gopher-rdp -host 192.168.1.100 -user admin -pass secret -web 8080 -display 2

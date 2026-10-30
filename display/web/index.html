@@ -589,7 +589,7 @@
 
   // Connect WebSocket, passing resolution for RDP auto-sizing
   var proto = location.protocol === "https:" ? "wss:" : "ws:";
-  var ws = new WebSocket(proto + "//" + location.host + "/ws?w=" + W + "&h=" + H + "&monitor=" + (monIdx || "0") + avcParam + scaleParam);
+  var ws = new WebSocket(proto + "//" + location.host + "/ws?w=" + W + "&h=" + H + "&monitor=" + (monIdx || "0") + avcParam + scaleParam + "&token=" + encodeURIComponent(params.get("token") || ""));
   ws.binaryType = "arraybuffer";
 
   // H.264 decoder state

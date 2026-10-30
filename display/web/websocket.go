@@ -36,6 +36,10 @@ func (c *wsConn) Read(p []byte) (int, error) {
 // Returns a *wsConn that wraps the hijacked connection with the
 // buffered reader from the HTTP server.
 func upgradeWebSocket(w http.ResponseWriter, r *http.Request) (*wsConn, error) {
+	if !sameOrigin(r) {
+		http.Error(w, "forbidden origin", http.StatusForbidden)
+		return nil, errors.New("forbidden origin")
+	}
 	key := r.Header.Get("Sec-WebSocket-Key")
 	if key == "" {
 		http.Error(w, "missing Sec-WebSocket-Key", http.StatusBadRequest)

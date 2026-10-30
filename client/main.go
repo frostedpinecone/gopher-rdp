@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"flag"
 	"fmt"
 	"io"
@@ -1075,6 +1076,7 @@ func main() {
 	// Web viewer mode
 	if webAddr != "" {
 		addr := web.ListenAddr(webAddr)
+		token := rand.Text()
 		if len(monitors) > 1 {
 			// Multi-display: Dispatcher manages RDP lifecycle.
 			// RDP connects when the first browser tab connects.
@@ -1086,8 +1088,8 @@ func main() {
 				}
 			}
 			d := web.NewDispatcher(opts, monRects, logger, kbMode)
-			handler := web.NewMultiMonitorHandler(d)
-			cliLog("Web viewer at http://localhost:%s (%d displays)", webAddr, len(monitors))
+			handler := web.WithSessionToken(web.NewMultiMonitorHandler(d), token)
+			cliLog("Web viewer at http://%s/?token=%s (%d displays)", addr, token, len(monitors))
 			srv := &http.Server{Addr: addr, Handler: handler}
 			go func() {
 				<-d.Done()
@@ -1101,7 +1103,8 @@ func main() {
 		}
 		// Single display: defer RDP connection until browser reports resolution.
 		handler, sessionDone := web.NewAutoWebHandler(opts)
-		cliLog("Web viewer at http://localhost:%s", webAddr)
+		handler = web.WithSessionToken(handler, token)
+		cliLog("Web viewer at http://%s/?token=%s", addr, token)
 		srv := &http.Server{Addr: addr, Handler: handler}
 		go func() {
 			<-sessionDone
