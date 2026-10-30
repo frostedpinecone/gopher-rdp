@@ -272,8 +272,11 @@ func (h *Handler) Close() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, dev := range h.devices {
-		if sc, ok := dev.(*SmartcardDevice); ok {
-			sc.Close()
+		switch dev := dev.(type) {
+		case *SmartcardDevice:
+			dev.Close()
+		case *DiskDevice:
+			dev.Close()
 		}
 	}
 }

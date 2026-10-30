@@ -22,7 +22,7 @@ const windowsEpochDiff = 116444736000000000
 type DiskDevice struct {
 	id       uint32
 	name     string
-	root     string // cleaned absolute path
+	root     *os.Root // confines filesystem operations to the shared directory
 	readOnly bool
 	log      *slog.Logger
 
@@ -106,11 +106,9 @@ func (d *DiskDevice) HandleIRP(h *Handler, req *IORequest) {
 
 // NewDiskDevice creates a new disk device.
 func NewDiskDevice(id uint32, name, localPath string, readOnly bool, log *slog.Logger) *DiskDevice {
-	root, _ := filepath.Abs(filepath.Clean(localPath))
-	// Resolve symlinks/junctions so the prefix check uses the real path.
-	// This prevents symlinks under root from escaping the share boundary.
-	if real, err := filepath.EvalSymlinks(root); err == nil {
-		root = real
+	root, err := os.OpenRoot(localPath)
+	if err != nil {
+		log.Error("cannot open redirected drive", "path", localPath, "error", err)
 	}
 	return &DiskDevice{
 		id:       id,
@@ -123,51 +121,28 @@ func NewDiskDevice(id uint32, name, localPath string, readOnly bool, log *slog.L
 	}
 }
 
-// resolvePath maps an RDP-style path (backslash-separated) to a local absolute path.
-// Returns the resolved path and true if it stays within root; empty string and false otherwise.
-// Symlinks, junctions, and mount points are resolved to their real paths to prevent
-// a symlink under root from escaping the share boundary.
+// Close releases the root and any outstanding file handles.
+func (d *DiskDevice) Close() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for id, of := range d.files {
+		of.f.Close()
+		delete(d.files, id)
+	}
+	if d.root != nil {
+		d.root.Close()
+	}
+}
+
+// resolvePath converts an RDP path to a path relative to the shared root.
+// os.Root enforces containment again during each filesystem operation.
 func (d *DiskDevice) resolvePath(rdpPath string) (string, bool) {
-	// Convert backslashes to forward slashes
-	p := strings.ReplaceAll(rdpPath, "\\", "/")
-	// Strip leading slash
-	p = strings.TrimLeft(p, "/")
-	// Clean the path
-	p = filepath.Clean(p)
-
-	// Reject any path that attempts to escape root via ..
-	if p == ".." || strings.HasPrefix(p, "../") || strings.Contains(p, "/../") {
+	p := filepath.Clean(strings.TrimLeft(strings.ReplaceAll(rdpPath, "\\", "/"), "/"))
+	if d.root == nil || !filepath.IsLocal(p) {
 		return "", false
 	}
-
-	full := filepath.Join(d.root, p)
-
-	// Resolve symlinks/junctions to get the real path, then verify it
-	// stays within root. If the target doesn't exist yet (create), resolve
-	// the parent directory instead.
-	real, err := filepath.EvalSymlinks(full)
-	if err != nil {
-		// Target doesn't exist — resolve parent to catch symlinked directories
-		parent := filepath.Dir(full)
-		realParent, perr := filepath.EvalSymlinks(parent)
-		if perr != nil {
-			// Parent doesn't exist either; fall back to lexical check
-			if !hasPathPrefix(full, d.root) {
-				return "", false
-			}
-			return full, true
-		}
-		realFull := filepath.Join(realParent, filepath.Base(full))
-		if !hasPathPrefix(realFull, d.root) {
-			return "", false
-		}
-		return full, true
-	}
-
-	if !hasPathPrefix(real, d.root) {
-		return "", false
-	}
-	return full, true
+	_, err := d.root.Stat(p)
+	return p, err == nil || errors.Is(err, os.ErrNotExist)
 }
 
 // allocFileID returns the next available file handle ID.
@@ -222,7 +197,7 @@ func (d *DiskDevice) handleCreate(h *Handler, req *IORequest) {
 
 	isDir := createOptions&FileDirectoryFile != 0
 	deleteOnClose := createOptions&FileDeleteOnClose != 0
-	if deleteOnClose && (d.readOnly || localPath == d.root) {
+	if deleteOnClose && (d.readOnly || localPath == ".") {
 		h.sendIOCompletion(req.DeviceID, req.CompletionID, StatusAccessDenied, createOut[:])
 		return
 	}
@@ -230,14 +205,14 @@ func (d *DiskDevice) handleCreate(h *Handler, req *IORequest) {
 	// When neither FILE_DIRECTORY_FILE nor FILE_NON_DIRECTORY_FILE is set,
 	// detect the actual type from the filesystem (MS-FSCC behavior).
 	if !isDir && createOptions&FileNonDirectoryFile == 0 {
-		if fi, serr := os.Stat(localPath); serr == nil && fi.IsDir() {
+		if fi, serr := d.root.Stat(localPath); serr == nil && fi.IsDir() {
 			isDir = true
 		}
 	}
 
 	// FILE_NON_DIRECTORY_FILE on a directory must fail with STATUS_FILE_IS_A_DIRECTORY.
 	if createOptions&FileNonDirectoryFile != 0 {
-		if fi, serr := os.Stat(localPath); serr == nil && fi.IsDir() {
+		if fi, serr := d.root.Stat(localPath); serr == nil && fi.IsDir() {
 			h.sendIOCompletion(req.DeviceID, req.CompletionID, StatusFileIsADirectory, createOut[:])
 			return
 		}
@@ -250,7 +225,7 @@ func (d *DiskDevice) handleCreate(h *Handler, req *IORequest) {
 	if isDir {
 		info, err = d.createDirectory(localPath, createDisposition)
 		if err == nil {
-			f, err = os.Open(localPath)
+			f, err = d.root.Open(localPath)
 		}
 	} else {
 		f, info, err = d.createFile(localPath, createDisposition)
@@ -290,7 +265,7 @@ func (d *DiskDevice) handleCreate(h *Handler, req *IORequest) {
 func (d *DiskDevice) createDirectory(path string, disposition uint32) (uint8, error) {
 	switch disposition {
 	case FileOpen:
-		fi, err := os.Stat(path)
+		fi, err := d.root.Stat(path)
 		if err != nil {
 			return 0, err
 		}
@@ -302,19 +277,19 @@ func (d *DiskDevice) createDirectory(path string, disposition uint32) (uint8, er
 		if d.readOnly {
 			return 0, os.ErrPermission
 		}
-		if err := os.Mkdir(path, 0755); err != nil {
+		if err := d.root.Mkdir(path, 0755); err != nil {
 			return 0, err
 		}
 		return FileCreated, nil
 	case FileOpenIf:
-		fi, err := os.Stat(path)
+		fi, err := d.root.Stat(path)
 		if err == nil && fi.IsDir() {
 			return FileOpened, nil
 		}
 		if d.readOnly {
 			return 0, os.ErrPermission
 		}
-		if err := os.MkdirAll(path, 0755); err != nil {
+		if err := d.root.MkdirAll(path, 0755); err != nil {
 			return 0, err
 		}
 		return FileCreated, nil
@@ -327,10 +302,10 @@ func (d *DiskDevice) createDirectory(path string, disposition uint32) (uint8, er
 func (d *DiskDevice) createFile(path string, disposition uint32) (*os.File, uint8, error) {
 	switch disposition {
 	case FileOpen:
-		f, err := os.OpenFile(path, os.O_RDWR, 0)
+		f, err := d.root.OpenFile(path, os.O_RDWR, 0)
 		if err != nil {
 			// Try read-only
-			f, err = os.Open(path)
+			f, err = d.root.Open(path)
 			if err != nil {
 				return nil, 0, err
 			}
@@ -340,28 +315,28 @@ func (d *DiskDevice) createFile(path string, disposition uint32) (*os.File, uint
 		if d.readOnly {
 			return nil, 0, os.ErrPermission
 		}
-		f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0644)
+		f, err := d.root.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0644)
 		if err != nil {
 			return nil, 0, err
 		}
 		return f, FileCreated, nil
 	case FileOpenIf:
 		if d.readOnly {
-			f, err := os.Open(path)
+			f, err := d.root.Open(path)
 			if err != nil {
 				return nil, 0, os.ErrPermission
 			}
 			return f, FileOpened, nil
 		}
-		_, err := os.Stat(path)
+		_, err := d.root.Stat(path)
 		if err == nil {
-			f, err := os.OpenFile(path, os.O_RDWR, 0)
+			f, err := d.root.OpenFile(path, os.O_RDWR, 0)
 			if err != nil {
 				return nil, 0, err
 			}
 			return f, FileOpened, nil
 		}
-		f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+		f, err := d.root.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -370,7 +345,7 @@ func (d *DiskDevice) createFile(path string, disposition uint32) (*os.File, uint
 		if d.readOnly {
 			return nil, 0, os.ErrPermission
 		}
-		f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+		f, err := d.root.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -379,16 +354,16 @@ func (d *DiskDevice) createFile(path string, disposition uint32) (*os.File, uint
 		if d.readOnly {
 			return nil, 0, os.ErrPermission
 		}
-		_ = os.Remove(path)
-		f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+		_ = d.root.Remove(path)
+		f, err := d.root.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
 		if err != nil {
 			return nil, 0, err
 		}
 		return f, FileSuperseded, nil
 	default:
-		f, err := os.OpenFile(path, os.O_RDWR, 0)
+		f, err := d.root.OpenFile(path, os.O_RDWR, 0)
 		if err != nil {
-			f, err = os.Open(path)
+			f, err = d.root.Open(path)
 			if err != nil {
 				return nil, 0, err
 			}
@@ -412,8 +387,8 @@ func (d *DiskDevice) handleClose(h *Handler, req *IORequest) {
 			slog.String("path", of.path),
 			slog.Bool("deleteOnClose", of.deleteOnClose),
 			slog.Int("fileID", int(req.FileID)))
-		if of.deleteOnClose && !d.readOnly && of.path != d.root {
-			if err := os.Remove(of.path); err != nil {
+		if of.deleteOnClose && !d.readOnly && of.path != "." {
+			if err := d.root.Remove(of.path); err != nil {
 				d.log.LogAttrs(context.Background(), slog.LevelWarn, "delete on close failed",
 					slog.String("path", of.path), slog.Any("err", err))
 			} else {
@@ -605,7 +580,7 @@ func (d *DiskDevice) handleQueryInfo(h *Handler, req *IORequest) {
 		return
 	}
 
-	fi, err := os.Stat(of.path)
+	fi, err := d.root.Stat(of.path)
 	if err != nil {
 		h.sendIOCompletion(req.DeviceID, req.CompletionID, osErrToNTStatus(err), nil)
 		return
@@ -711,7 +686,7 @@ func (d *DiskDevice) handleSetInfo(h *Handler, req *IORequest) {
 		h.sendIOCompletion(req.DeviceID, req.CompletionID, StatusSuccess, out[:])
 
 	case FileDispositionInformation:
-		if d.readOnly || of.path == d.root {
+		if d.readOnly || of.path == "." {
 			h.sendIOCompletion(req.DeviceID, req.CompletionID, StatusAccessDenied, nil)
 			return
 		}
@@ -727,7 +702,7 @@ func (d *DiskDevice) handleSetInfo(h *Handler, req *IORequest) {
 		h.sendIOCompletion(req.DeviceID, req.CompletionID, StatusSuccess, out[:])
 
 	case FileRenameInformation:
-		if d.readOnly {
+		if d.readOnly || of.path == "." {
 			h.sendIOCompletion(req.DeviceID, req.CompletionID, StatusAccessDenied, nil)
 			return
 		}
@@ -748,7 +723,7 @@ func (d *DiskDevice) handleSetInfo(h *Handler, req *IORequest) {
 			h.sendIOCompletion(req.DeviceID, req.CompletionID, StatusAccessDenied, nil)
 			return
 		}
-		if err := os.Rename(of.path, newPath); err != nil {
+		if err := d.root.Rename(of.path, newPath); err != nil {
 			h.sendIOCompletion(req.DeviceID, req.CompletionID, osErrToNTStatus(err), nil)
 			return
 		}
@@ -812,7 +787,7 @@ func (d *DiskDevice) handleQueryDirectory(h *Handler, req *IORequest) {
 			slog.String("pattern", pattern),
 			slog.Int("fileID", int(req.FileID)))
 
-		entries, err := os.ReadDir(of.path)
+		entries, err := fs.ReadDir(d.root.FS(), filepath.ToSlash(of.path))
 		if err != nil {
 			h.sendIOCompletion(req.DeviceID, req.CompletionID, osErrToNTStatus(err), nil)
 			return
@@ -855,7 +830,7 @@ func (d *DiskDevice) handleQueryDirectory(h *Handler, req *IORequest) {
 				continue
 			}
 			name = "."
-			info, err = os.Stat(of.path)
+			info, err = d.root.Stat(of.path)
 		case idx == 1: // ".."
 			if !includeMetaDirs {
 				d.mu.Lock()
@@ -863,7 +838,7 @@ func (d *DiskDevice) handleQueryDirectory(h *Handler, req *IORequest) {
 			}
 			name = ".."
 			parent := filepath.Dir(of.path)
-			info, err = os.Stat(parent)
+			info, err = d.root.Stat(parent)
 		default:
 			entry := of.dirEntries[idx-2]
 			name = entry.Name()
@@ -871,8 +846,8 @@ func (d *DiskDevice) handleQueryDirectory(h *Handler, req *IORequest) {
 				d.mu.Lock()
 				continue
 			}
-			// Use os.Stat (not entry.Info/Lstat) so symlinks report target attributes.
-			info, err = os.Stat(filepath.Join(of.path, name))
+			// Resolve entry attributes within the share, including symlink targets.
+			info, err = d.root.Stat(filepath.Join(of.path, name))
 		}
 		if err != nil {
 			// Skip this entry (broken symlink, etc.) and try the next one.

@@ -45,6 +45,7 @@ func TestFiletimeRoundTrip(t *testing.T) {
 func TestPathTraversal(t *testing.T) {
 	root := t.TempDir()
 	dev := NewDiskDevice(1, "test", root, false, slog.New(slog.DiscardHandler))
+	t.Cleanup(dev.Close)
 
 	tests := []struct {
 		name    string
@@ -81,6 +82,7 @@ func TestSymlinkEscape(t *testing.T) {
 	}
 
 	dev := NewDiskDevice(1, "test", root, false, slog.New(slog.DiscardHandler))
+	t.Cleanup(dev.Close)
 
 	// Accessing through the symlink should be rejected
 	_, ok := dev.resolvePath("escape\\secret.txt")
@@ -102,11 +104,12 @@ func TestSymlinkWithinRoot(t *testing.T) {
 	subdir := filepath.Join(root, "real")
 	os.Mkdir(subdir, 0755)
 	link := filepath.Join(root, "link")
-	if err := os.Symlink(subdir, link); err != nil {
+	if err := os.Symlink("real", link); err != nil {
 		t.Skip("symlinks not supported:", err)
 	}
 
 	dev := NewDiskDevice(1, "test", root, false, slog.New(slog.DiscardHandler))
+	t.Cleanup(dev.Close)
 
 	// Symlink within root should be allowed
 	_, ok := dev.resolvePath("link")

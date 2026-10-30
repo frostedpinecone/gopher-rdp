@@ -64,3 +64,60 @@ func TestDeleteOnClose(t *testing.T) {
 		})
 	}
 }
+
+func TestDriveRootContainment(t *testing.T) {
+	base := t.TempDir()
+	root, outside := filepath.Join(base, "share"), filepath.Join(base, "share-secret")
+	for _, dir := range []string{root, outside, filepath.Join(root, "inside")} {
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(outside, "missing"), filepath.Join(root, "dangling")); err != nil {
+		t.Skip(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("inside", filepath.Join(root, "safe")); err != nil {
+		t.Fatal(err)
+	}
+	d := NewDiskDevice(1, "share", root, false, slog.New(slog.DiscardHandler))
+	t.Cleanup(d.Close)
+	for _, path := range []string{"dangling", "escape/new/nested", "../share-secret/file", `..\share-secret\file`} {
+		if _, ok := d.resolvePath(path); ok {
+			t.Errorf("accepted escape %q", path)
+		}
+	}
+	path, ok := d.resolvePath("safe/new/file")
+	if !ok {
+		t.Fatal("rejected nested creation inside share")
+	}
+	if _, err := d.createDirectory(filepath.Dir(path), FileOpenIf); err != nil {
+		t.Fatal(err)
+	}
+	f, _, err := d.createFile(path, FileOpenIf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if _, err := os.Stat(filepath.Join(root, "inside/new/file")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Replace a checked parent with a symlink before the actual open.
+	path, ok = d.resolvePath("inside/raced")
+	if !ok {
+		t.Fatal("rejected local path")
+	}
+	if err := os.Rename(filepath.Join(root, "inside"), filepath.Join(root, "moved")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "inside")); err != nil {
+		t.Fatal(err)
+	}
+	if f, _, err := d.createFile(path, FileOpenIf); err == nil {
+		f.Close()
+		t.Fatal("opened a path outside the share after parent replacement")
+	}
+}
