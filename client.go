@@ -212,6 +212,8 @@ type Client struct {
 	pendingResizeW   uint16 // queued resize width (0 = none)
 	pendingResizeH   uint16 // queued resize height
 	pendingMonitors  []disp.MonitorLayout // queued multi-monitor resize (nil = none)
+	resizeMu         sync.Mutex           // guards pendingResizeW and pendingResizeH
+	connectedAt      time.Time            // when the current connection was established
 
 	// Share session
 	shareID    atomic.Uint32
@@ -506,6 +508,7 @@ func (c *Client) Connect() error {
 	c.desktopSaveBuf = new(orders.DesktopSaveCache)
 
 	c.log.LogAttrs(context.Background(), slog.LevelInfo, "connection established", slog.String("state", c.State().String()))
+	c.connectedAt = time.Now()
 	c.setState(StateConnected)
 
 	c.receiveLoopDone = make(chan struct{})
@@ -978,10 +981,7 @@ func (c *Client) mcsConnect() error {
 					if err := c.dispHandler.ResizeMulti(monitors); err != nil {
 						c.log.LogAttrs(context.Background(), slog.LevelError, "queued multi-monitor resize failed", slog.Any("err", err))
 					}
-				} else if c.pendingResizeW > 0 && c.pendingResizeH > 0 {
-					w, h := c.pendingResizeW, c.pendingResizeH
-					c.pendingResizeW = 0
-					c.pendingResizeH = 0
+				} else if w, h := c.takePendingResize(); w > 0 && h > 0 {
 					c.log.LogAttrs(context.Background(), slog.LevelDebug, "flushing queued resize", slog.Int("width", int(w)), slog.Int("height", int(h)))
 					var resizeErr error
 					if c.opts.DesktopScaleFactor > 0 {
@@ -2452,8 +2452,7 @@ func (c *Client) resetForReconnect() {
 	c.rdpdrHandler = nil
 	c.vcReassembly = nil
 	c.vcReassemblyTotal = 0
-	c.pendingResizeW = 0
-	c.pendingResizeH = 0
+	c.takePendingResize()
 	c.pendingMonitors = nil
 	c.serverCore = nil
 	c.serverSec = nil
@@ -5581,6 +5580,21 @@ func (c *Client) Resize(width, height int) error {
 	c.opts.Height = uint16(height)
 
 	if c.dispHandler == nil {
+		// Windows can open the DISP channel seconds after the session starts.
+		// A resize in that window waits for it instead of reconnecting, which
+		// would close Done() and end viewers that treat that as a disconnect.
+		if wait := dispGracePeriod - time.Since(c.connectedAt); wait > 0 {
+			c.resizeMu.Lock()
+			first := c.pendingResizeW == 0
+			c.pendingResizeW, c.pendingResizeH = uint16(width), uint16(height)
+			c.resizeMu.Unlock()
+			if first {
+				time.AfterFunc(wait, c.resizeAfterGrace)
+			}
+			c.log.LogAttrs(context.Background(), slog.LevelDebug, "display channel not open yet, queuing resize",
+				slog.Int("width", width), slog.Int("height", height))
+			return nil
+		}
 		// Server doesn't support DISP (pre-Win8): reconnect with new dimensions.
 		c.log.LogAttrs(context.Background(), slog.LevelInfo, "DISP not available, reconnect-based resize",
 			slog.Int("width", width), slog.Int("height", height))
@@ -5591,8 +5605,9 @@ func (c *Client) Resize(width, height int) error {
 		// DISP channel opened but caps not received yet — queue.
 		c.log.LogAttrs(context.Background(), slog.LevelDebug, "display channel not ready, queuing resize",
 			slog.Int("width", width), slog.Int("height", height))
-		c.pendingResizeW = uint16(width)
-		c.pendingResizeH = uint16(height)
+		c.resizeMu.Lock()
+		c.pendingResizeW, c.pendingResizeH = uint16(width), uint16(height)
+		c.resizeMu.Unlock()
 		return nil
 	}
 	if c.opts.DesktopScaleFactor > 0 {
@@ -5607,6 +5622,31 @@ func (c *Client) Resize(width, height int) error {
 		}
 	}
 	return nil
+}
+
+// dispGracePeriod is how long after connecting a resize waits for the DISP
+// channel before falling back to a reconnect-based resize.
+const dispGracePeriod = 5 * time.Second
+
+// takePendingResize returns and clears the queued single-monitor resize.
+func (c *Client) takePendingResize() (uint16, uint16) {
+	c.resizeMu.Lock()
+	defer c.resizeMu.Unlock()
+	w, h := c.pendingResizeW, c.pendingResizeH
+	c.pendingResizeW, c.pendingResizeH = 0, 0
+	return w, h
+}
+
+// resizeAfterGrace applies a resize queued during dispGracePeriod when the
+// DISP channel never opened. If it did open, its OnReady flush owns the resize.
+func (c *Client) resizeAfterGrace() {
+	if c.State() != StateConnected || c.dispHandler != nil {
+		return
+	}
+	if w, h := c.takePendingResize(); w > 0 && h > 0 {
+		c.opts.Width, c.opts.Height = w, h
+		c.resizeViaReconnect()
+	}
 }
 
 // ResizeMulti requests a multi-monitor layout change via MS-RDPEDISP.
