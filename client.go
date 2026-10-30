@@ -28,6 +28,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -350,6 +351,10 @@ func (c *Client) Connect() error {
 		c.Close()
 		return err
 	}
+	if c.opts.RequireNLA && c.selectedProtocol != x224.ProtocolHybrid {
+		c.Close()
+		return fmt.Errorf("%w: server did not select NLA", ErrNegotiationFailed)
+	}
 
 	// Step 3: TLS handshake (if TLS/CredSSP selected)
 	var initialTLSErr error
@@ -407,6 +412,10 @@ func (c *Client) Connect() error {
 			// Credentials are definitively wrong — no point retrying or falling back.
 			c.Close()
 			return fmt.Errorf("%w: %v", ErrAuthFailed, credsspErr)
+		}
+		if credsspErr != nil && c.opts.RequireNLA {
+			c.Close()
+			return credsspErr
 		}
 		if credsspErr != nil {
 			// All NLA attempts failed. Try TLS-only fallback, probing versions.
@@ -525,6 +534,9 @@ func (c *Client) negotiateX224WithFallback() error {
 
 	var lastErr error
 	for i, a := range attempts {
+		if i > 0 && c.opts.RequireNLA {
+			return lastErr
+		}
 		if i > 0 {
 			// Reconnect TCP for the retry — server closed the previous socket.
 			c.conn.Close()
@@ -620,6 +632,12 @@ func (c *Client) upgradeTLS() error {
 		// Cap TLS at 1.2 when CredSSP/NLA is selected. Some Windows servers
 		// fail to process CredSSP over TLS 1.3 (MS-CSSP was designed for 1.2).
 		tlsConfig.MaxVersion = tls.VersionTLS12
+	}
+
+	if verify := c.opts.VerifyPeerCertificate; verify != nil {
+		tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			return verify(rawCerts)
+		}
 	}
 
 	tlsConn := tls.Client(c.conn, tlsConfig)

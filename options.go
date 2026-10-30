@@ -31,6 +31,13 @@ type Options struct {
 	Password string // Login password
 	Domain   string // Windows domain (optional)
 
+	// RequireNLA refuses every path that would send the password outside
+	// CredSSP: negotiation fallback, TLS-only selection, and legacy RDP Security.
+	RequireNLA bool
+	// VerifyPeerCertificate receives the server's raw certificate chain during
+	// the TLS handshake. Returning an error aborts before credentials are sent.
+	VerifyPeerCertificate func(rawCerts [][]byte) error
+
 	// Display
 	Width              uint16 // Desktop width in pixels
 	Height             uint16 // Desktop height in pixels
