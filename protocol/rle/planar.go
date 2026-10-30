@@ -141,6 +141,11 @@ func decodePlaneRLEStrided(dst []byte, src []byte, width, height, stride int) (i
 			if srcOff+cRaw > len(src) {
 				return 0, errPlanarShort
 			}
+			if total == 0 {
+				// An empty run writes nothing, and the bounds hint below
+				// would index before dstOff.
+				continue
+			}
 
 			// BCE: prove dst write range is in-bounds.
 			_ = dst[dstOff+(total-1)*stride]
@@ -186,6 +191,11 @@ func decodePlaneRLEStrided(dst []byte, src []byte, width, height, stride int) (i
 			}
 			if srcOff+cRaw > len(src) {
 				return 0, errPlanarShort
+			}
+			if total == 0 {
+				// An empty run writes nothing, and the bounds hint below
+				// would index before dstOff.
+				continue
 			}
 
 			// BCE: prove dst and prevRow ranges are in-bounds.
