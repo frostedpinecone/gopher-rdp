@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/asn1"
 	"encoding/binary"
+	"strings"
 	"testing"
 )
 
@@ -195,6 +196,18 @@ func TestReadDERLength(t *testing.T) {
 		}
 		if got != tt.want {
 			t.Errorf("readDERLength(%v) = %d, want %d", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestReadTSRequestRejectsOversizedLength(t *testing.T) {
+	for _, header := range [][]byte{
+		{0x30, 0x84, 0xff, 0xff, 0xff, 0xff},
+		{0x30, 0x83, 0x10, 0x00, 0x01},
+		{0x30, 0x80}, // indefinite lengths are not DER
+	} {
+		if _, err := readTSRequest(bytes.NewReader(header)); err == nil || (!strings.Contains(err.Error(), "limit") && !strings.Contains(err.Error(), "DER length")) {
+			t.Fatalf("did not reject length before reading body: header=%x err=%v", header, err)
 		}
 	}
 }

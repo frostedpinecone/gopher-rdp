@@ -340,6 +340,11 @@ func readTSRequest(r io.Reader) (*tsRequest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading TSRequest length: %w", err)
 	}
+	// NTLM CredSSP tokens are small; never allocate from an unchecked DER length.
+	const maxTSRequestSize = 1024 * 1024
+	if length < 0 || length > maxTSRequestSize {
+		return nil, errors.New("credssp: TSRequest size exceeds limit")
+	}
 
 	// Read the full DER value
 	value := make([]byte, length)
@@ -381,7 +386,7 @@ func readDERLength(r io.Reader) (int, error) {
 		return int(b[0]), nil
 	}
 	numBytes := int(b[0] & 0x7F)
-	if numBytes > 4 {
+	if numBytes == 0 || numBytes > 4 {
 		return 0, errors.New("DER length too large")
 	}
 	buf := make([]byte, numBytes)
