@@ -37,6 +37,11 @@ type Options struct {
 	// VerifyPeerCertificate receives the server's raw certificate chain during
 	// the TLS handshake. Returning an error aborts before credentials are sent.
 	VerifyPeerCertificate func(rawCerts [][]byte) error
+	// SingleAuthAttempt stops retrying NLA with other TLS and CredSSP versions
+	// once credentials have reached the server. Each retry can count as a failed
+	// logon, so one wrong password could otherwise lock an account out sooner.
+	// Retries that happen before credentials are sent are unaffected.
+	SingleAuthAttempt bool
 
 	// Display
 	Width              uint16 // Desktop width in pixels

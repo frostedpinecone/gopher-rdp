@@ -21,6 +21,11 @@ import (
 // Callers should stop probing and report the error immediately.
 var ErrCredentialsFatal = errors.New("credentials rejected")
 
+// ErrCredentialsSent marks a failure after the NTLM Authenticate message was
+// sent. The server may have evaluated the password, so a retry can count as
+// another failed logon toward account lockout. It wraps the underlying error.
+var ErrCredentialsSent = errors.New("credentials sent")
+
 // isFatalNTSTATUS returns true for error codes where retrying is pointless.
 func isFatalNTSTATUS(code int) bool {
 	switch uint32(code) {
@@ -77,7 +82,13 @@ type tsPasswordCreds struct {
 // advertiseVersion is the CredSSP version sent in the initial TSRequest;
 // the actual version used is the minimum of this and the server's response.
 // The hostname is used to construct the SPN for MsvAvTargetName in the NTLM TargetInfo.
-func Authenticate(tlsConn *tls.Conn, log *slog.Logger, hostname, domain, username, password string, advertiseVersion int) error {
+func Authenticate(tlsConn *tls.Conn, log *slog.Logger, hostname, domain, username, password string, advertiseVersion int) (err error) {
+	sent := false
+	defer func() {
+		if err != nil && sent {
+			err = fmt.Errorf("%w: %w", ErrCredentialsSent, err)
+		}
+	}()
 	ctx := context.Background()
 
 	// Compute TLS channel bindings hash (RFC 5929 tls-server-end-point)
@@ -219,6 +230,7 @@ func Authenticate(tlsConn *tls.Conn, log *slog.Logger, hostname, domain, usernam
 		req2.ClientNonce = clientNonce
 	}
 	log.LogAttrs(ctx, slog.LevelDebug, "sending NTLM Authenticate + pubKeyAuth")
+	sent = true
 	if err := sendTSRequest(tlsConn, req2); err != nil {
 		return fmt.Errorf("credssp: sending authenticate: %w", err)
 	}

@@ -384,7 +384,7 @@ func (c *Client) Connect() error {
 		} else {
 			credsspErr = c.tryCredSSP()
 		}
-		if credsspErr != nil && !errors.Is(credsspErr, nla.ErrCredentialsFatal) {
+		if credsspErr != nil && !errors.Is(credsspErr, nla.ErrCredentialsFatal) && !c.credentialsSpent(credsspErr) {
 			credsspVersions := []int{6, 3, 2}
 		probeLoop:
 			for i, tlsVer := range tlsVersions {
@@ -401,17 +401,18 @@ func (c *Client) Connect() error {
 					if credsspErr == nil {
 						break probeLoop
 					}
-					if errors.Is(credsspErr, nla.ErrCredentialsFatal) {
+					if errors.Is(credsspErr, nla.ErrCredentialsFatal) || c.credentialsSpent(credsspErr) {
 						break probeLoop
 					}
 				}
 			}
 			c.credsspVersion = 0 // reset
 		}
-		if credsspErr != nil && errors.Is(credsspErr, nla.ErrCredentialsFatal) {
-			// Credentials are definitively wrong — no point retrying or falling back.
+		if credsspErr != nil && (errors.Is(credsspErr, nla.ErrCredentialsFatal) || c.credentialsSpent(credsspErr)) {
+			// Credentials are definitively wrong, or were already sent under
+			// SingleAuthAttempt. credsspAuth has wrapped ErrAuthFailed.
 			c.Close()
-			return fmt.Errorf("%w: %v", ErrAuthFailed, credsspErr)
+			return credsspErr
 		}
 		if credsspErr != nil && c.opts.RequireNLA {
 			c.Close()
@@ -695,10 +696,16 @@ func (c *Client) credsspAuth() error {
 	}
 	c.logNla.LogAttrs(context.Background(), slog.LevelInfo, "CredSSP/NLA authentication", slog.Int("advertiseVersion", ver))
 	if err := nla.Authenticate(c.tlsConn, c.logNla, c.opts.Host, c.opts.Domain, c.opts.Username, c.opts.Password, ver); err != nil {
-		return fmt.Errorf("%w: %v", ErrAuthFailed, err)
+		return fmt.Errorf("%w: %w", ErrAuthFailed, err)
 	}
 	c.logNla.LogAttrs(context.Background(), slog.LevelInfo, "CredSSP authentication successful")
 	return nil
+}
+
+// credentialsSpent reports whether a failed NLA attempt must not be repeated
+// because SingleAuthAttempt is set and the server already received credentials.
+func (c *Client) credentialsSpent(err error) bool {
+	return c.opts.SingleAuthAttempt && errors.Is(err, nla.ErrCredentialsSent)
 }
 
 // mcsConnect performs the MCS Connect Initial/Response exchange
